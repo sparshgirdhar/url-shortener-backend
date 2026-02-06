@@ -8,6 +8,7 @@ import java.time.Instant;
 @Entity
 @Table(name = "url_mappings")
 @Getter
+@Setter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor
 @Builder
