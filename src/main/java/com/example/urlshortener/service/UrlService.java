@@ -7,12 +7,15 @@ import com.example.urlshortener.repository.UrlMappingRepository;
 import com.example.urlshortener.util.Base62Encoder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 @Service
 @RequiredArgsConstructor
@@ -21,7 +24,8 @@ public class UrlService {
 
     private final UrlMappingRepository repository;
 
-    private static final String BASE_URL = "http://localhost:8080/";
+    private final StringRedisTemplate stringRedisTemplate;
+
 
     @Transactional
     public UrlMapping createShortUrl(String originalUrl) {
@@ -43,18 +47,23 @@ public class UrlService {
                 });
     }
 
-    /**
-     * Gets the original URL for redirect
-     *
-     * @param shortCode The short code from URL path
-     * @return Original URL to redirect to
-     * @throws UrlNotFoundException if short code doesn't exist
-     * @throws UrlExpiredException if URL has expired
-     */
-    @Transactional(readOnly = true) // Performance Optimization
     public String getOriginalUrl(String shortCode) {
-        log.debug("Looking up short code: {}", shortCode);
 
+        log.debug("Looking up short code: {}", shortCode);
+        String cacheKey = "short:" + shortCode;
+
+        // 1️⃣ FAST PATH — Redis
+        try {
+            String cachedUrl = stringRedisTemplate.opsForValue().get(cacheKey);
+            if (cachedUrl != null) {
+                log.debug("Cache hit for shortCode={}", shortCode);
+                return cachedUrl;
+            }
+        } catch (Exception e) {
+            log.warn("Redis unavailable, falling back to DB: {}", e.getMessage());
+        }
+
+        // 2️⃣ SAFE PATH — DB
         UrlMapping mapping = repository.findByShortCode(shortCode)
                 .orElseThrow(() -> {
                     log.warn("Short code not found: {}", shortCode);
@@ -66,11 +75,33 @@ public class UrlService {
             throw new UrlExpiredException("This link is no longer active");
         }
 
-        if (mapping.getExpiresAt() != null && mapping.getExpiresAt().isBefore(Instant.now())) {
+        Instant now = Instant.now();
+        if (mapping.getExpiresAt() != null && mapping.getExpiresAt().isBefore(now)) {
             log.warn("Expired URL accessed: {}", shortCode);
             throw new UrlExpiredException("This link has expired");
         }
 
-        return mapping.getOriginalUrl();
+        String originalUrl = mapping.getOriginalUrl();
+
+        // 3️⃣ Populate Redis
+        try {
+            if (mapping.getExpiresAt() != null) {
+                long ttlSeconds = Duration.between(now, mapping.getExpiresAt()).getSeconds();
+
+
+                if (ttlSeconds > 0) {
+                    stringRedisTemplate.opsForValue()
+                            .set(cacheKey, originalUrl, ttlSeconds, TimeUnit.SECONDS);
+                }
+            } else {
+                // 🔑 NULL expiry → cache WITHOUT TTL
+                stringRedisTemplate.opsForValue()
+                        .set(cacheKey, originalUrl);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to populate Redis cache: {}", e.getMessage());
+        }
+
+        return originalUrl;
     }
 }
