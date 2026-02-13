@@ -54,9 +54,9 @@ public class UrlController {
      * GET /abc123 -> 302 Redirect to https://google.com
      */
     @GetMapping("/{shortCode}")
-    public ResponseEntity<Void> redirect(@PathVariable String shortCode) {
+    public ResponseEntity<Void> redirect(@PathVariable String shortCode, HttpServletRequest request) {
         // Get original URL from service
-        String originalUrl = urlService.getOriginalUrl(shortCode);
+        String originalUrl = urlService.getOriginalUrl(shortCode, request);
 
         // Return 302 redirect
         return ResponseEntity

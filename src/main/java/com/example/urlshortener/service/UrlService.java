@@ -1,10 +1,13 @@
 package com.example.urlshortener.service;
 
 import com.example.urlshortener.domain.UrlMapping;
+import com.example.urlshortener.dto.ClickEventDto;
 import com.example.urlshortener.exception.UrlExpiredException;
 import com.example.urlshortener.exception.UrlNotFoundException;
+import com.example.urlshortener.kafka.ClickEventProducer;
 import com.example.urlshortener.repository.UrlMappingRepository;
 import com.example.urlshortener.util.Base62Encoder;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -26,6 +29,7 @@ public class UrlService {
 
     private final StringRedisTemplate stringRedisTemplate;
 
+    private final ClickEventProducer clickEventProducer;
 
     @Transactional
     public UrlMapping createShortUrl(String originalUrl) {
@@ -47,7 +51,7 @@ public class UrlService {
                 });
     }
 
-    public String getOriginalUrl(String shortCode) {
+    public String getOriginalUrl(String shortCode, HttpServletRequest request) {
 
         log.debug("Looking up short code: {}", shortCode);
         String cacheKey = "short:" + shortCode;
@@ -57,6 +61,14 @@ public class UrlService {
             String cachedUrl = stringRedisTemplate.opsForValue().get(cacheKey);
             if (cachedUrl != null) {
                 log.debug("Cache hit for shortCode={}", shortCode);
+
+                // ✅ Publish event even for cached URLs!
+                try {
+                    publishClickEvent(shortCode, request);
+                } catch (Exception e) {
+                    log.error("Failed to publish click event from cache: {}", e.getMessage());
+                }
+
                 return cachedUrl;
             }
         } catch (Exception e) {
@@ -88,13 +100,11 @@ public class UrlService {
             if (mapping.getExpiresAt() != null) {
                 long ttlSeconds = Duration.between(now, mapping.getExpiresAt()).getSeconds();
 
-
                 if (ttlSeconds > 0) {
                     stringRedisTemplate.opsForValue()
                             .set(cacheKey, originalUrl, ttlSeconds, TimeUnit.SECONDS);
                 }
             } else {
-                // 🔑 NULL expiry → cache WITHOUT TTL
                 stringRedisTemplate.opsForValue()
                         .set(cacheKey, originalUrl);
             }
@@ -102,6 +112,35 @@ public class UrlService {
             log.warn("Failed to populate Redis cache: {}", e.getMessage());
         }
 
+        // 4️⃣ Publish click event (async!)
+        try {
+            publishClickEvent(shortCode, request);
+        } catch (Exception e) {
+            log.error("Failed to publish click event: {}", e.getMessage());
+        }
+
         return originalUrl;
     }
+
+    private void publishClickEvent(String shortCode, HttpServletRequest request) {
+        try {
+            ClickEventDto event = ClickEventDto.builder()
+                    .shortCode(shortCode)
+                    .clickedAt(Instant.now())
+                    .ipAddress(getClientIp(request))
+                    .userAgent(request.getHeader("User-Agent"))
+                    .referrer(request.getHeader("Referer"))
+                    .build();
+
+            clickEventProducer.publishClickEvent(event);
+        } catch (Exception e) {
+            log.error("Failed to create click event: {}", e.getMessage());
+        }
+    }
+
+    private String getClientIp(HttpServletRequest request) {
+        String ip = request.getHeader("X-Forwarded-For");
+        return (ip != null && !ip.isEmpty()) ? ip : request.getRemoteAddr();
+    }
+
 }
