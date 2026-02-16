@@ -9,8 +9,6 @@ A high-performance URL shortening service built with Spring Boot, featuring Redi
 [![Kafka](https://img.shields.io/badge/Kafka-3.6-black.svg)](https://kafka.apache.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
 
----
-
 ## 📋 Table of Contents
 
 - [Features](#features)
@@ -18,15 +16,10 @@ A high-performance URL shortening service built with Spring Boot, featuring Redi
 - [Tech Stack](#tech-stack)
 - [Getting Started](#getting-started)
 - [API Documentation](#api-documentation)
-- [Design Decisions](#design-decisions)
-- [Performance](#performance)
 - [Development](#development)
 - [Testing](#testing)
 - [Deployment](#deployment)
 - [Contributing](#contributing)
-- [License](#license)
-
----
 
 ## ✨ Features
 
@@ -49,8 +42,6 @@ A high-performance URL shortening service built with Spring Boot, featuring Redi
 - ✅ **Database Indexing** - Optimized B-tree indexes for fast lookups
 - ✅ **Soft Delete** - Preserve analytics and prevent short code reuse attacks
 - ✅ **Database Migrations** - Version-controlled schema with Flyway
-
----
 
 ## 🏗️ Architecture
 
@@ -126,8 +117,6 @@ A high-performance URL shortening service built with Spring Boot, featuring Redi
 4. Analytics Available for Queries
 ```
 
----
-
 ## 🛠️ Tech Stack
 
 ### Backend
@@ -151,8 +140,6 @@ A high-performance URL shortening service built with Spring Boot, featuring Redi
 - **Docker Compose** - Multi-container orchestration
 - **Maven** - Build automation
 - **Lombok** - Boilerplate reduction
-
----
 
 ## 🚀 Getting Started
 
@@ -192,8 +179,6 @@ mvn spring-boot:run
 mvn spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
----
-
 ## 📚 API Documentation
 
 ### Base URL
@@ -228,8 +213,6 @@ Content-Type: application/json
 - `400 Bad Request` - Invalid URL format
 - `429 Too Many Requests` - Rate limit exceeded
 
----
-
 #### 2. Redirect to Original URL
 
 **Request:**
@@ -247,8 +230,6 @@ Location: https://www.example.com/very/long/url/path
 - `302 Found` - Redirect successful
 - `404 Not Found` - Short code doesn't exist
 - `410 Gone` - URL has expired
-
----
 
 #### 3. Health Check
 
@@ -268,185 +249,6 @@ GET /actuator/health
   }
 }
 ```
-
----
-
-## 🎯 Design Decisions
-
-### 1. Short Code Generation (Base62)
-
-**Choice:** Base62 encoding of `System.nanoTime()`
-
-**Why Base62?**
-- ✅ **URL-Safe** - No special characters (0-9, A-Z, a-z)
-- ✅ **Compact** - 7 characters = 3.5 trillion combinations
-- ✅ **Human-Readable** - Easier to share/communicate
-
-**Character Set:**
-```
-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
-```
-
-**Math:**
-```
-62^7 = 3,521,614,606,208 URLs
-At 1000 URLs/second: 111 years to exhaust
-```
-
-**Future Enhancement:** Snowflake IDs for distributed generation
-
----
-
-### 2. Idempotency (Same URL → Same Short Code)
-
-**Choice:** Enabled with unique index on `original_url`
-
-**Why?**
-- ✅ **Better UX** - Users expect consistent results
-- ✅ **Prevents Duplicates** - No database bloat
-- ✅ **Safe Retries** - Network issues don't create duplicates
-- ✅ **Analytics Clarity** - Track same URL under one code
-
-**Implementation:**
-```sql
-CREATE UNIQUE INDEX idx_original_url ON url_mappings(original_url);
-```
-
-**Performance Impact:** ~1-2ms overhead with proper indexing (acceptable)
-
----
-
-### 3. Redis Cache-Aside Pattern
-
-**Choice:** Cache-aside with smart TTL
-
-**Why?**
-- ✅ **10x Performance** - <1ms cache hits vs 5-10ms DB queries
-- ✅ **Database Protection** - Offloads 80-90% of read traffic
-- ✅ **Graceful Degradation** - DB fallback if Redis fails
-
-**TTL Strategy:**
-```java
-// URLs with expiry → cache until expiry
-if (expiresAt != null) {
-    long ttl = Duration.between(now, expiresAt).getSeconds();
-    redisTemplate.set(key, url, ttl, SECONDS);
-}
-
-// Permanent URLs → cache without TTL (Redis LRU handles eviction)
-else {
-    redisTemplate.set(key, url);
-}
-```
-
----
-
-### 4. Rate Limiting (Token Bucket)
-
-**Choice:** IP-based rate limiting with Redis
-
-**Configuration:**
-- **Limit:** 100 requests/minute per IP
-- **Algorithm:** Token bucket with Redis
-- **Behavior:** Fail-open (allows requests if Redis is down)
-
-**Why?**
-- ✅ **Abuse Prevention** - Stops scrapers and bots
-- ✅ **Fair Usage** - Prevents single user from overwhelming system
-- ✅ **Cost Control** - Limits infrastructure costs
-
----
-
-### 5. Read-Time Expiry Check vs Cron-Based Cleanup
-
-**Choice:** Read-time expiry validation
-
-**Why?**
-- ✅ **Zero Staleness** - Always correct, no eventual consistency
-- ✅ **No Extra Writes** - Cron approach doubles database writes
-- ✅ **Simpler Code** - No distributed locking, scheduling, or coordination
-- ✅ **Better Scalability** - Stateless, works across multiple app instances
-
-**Industry Examples:**
-- AWS S3 Pre-signed URLs
-- JWT Token validation
-- Redis key TTL
-
-**Trade-off:** Database grows over time, but storage is cheap (~$0.02/GB/month)
-
----
-
-### 6. Kafka for Analytics (Fire-and-Forget)
-
-**Choice:** Async event publishing with Kafka
-
-**Why?**
-- ✅ **Non-Blocking** - Redirects never wait for analytics
-- ✅ **Decoupled** - Analytics failures don't affect core service
-- ✅ **Scalable** - Can process millions of events independently
-
-**Pattern:**
-```java
-@Async
-public void publishClickEvent(ClickEventDto event) {
-    kafkaTemplate.send(TOPIC, event);
-    // Returns immediately, doesn't block redirect
-}
-```
-
-**Resilience:** If Kafka is down, redirect still works (fail-open design)
-
----
-
-### 7. Soft Delete Pattern
-
-**Choice:** Mark as inactive instead of hard delete
-
-**Why?**
-- ✅ **Preserves Analytics** - Historical data retained
-- ✅ **Security** - Prevents short code reuse attacks
-- ✅ **Compliance** - Audit trail for regulations
-- ✅ **Reactivation** - Can extend expiry if needed
-
-**Attack Prevention:**
-```
-Day 1: abc123 → https://mybank.com
-Day 30: Expires → marked as INACTIVE (not deleted)
-Day 31: Hacker tries to get abc123
-Result: Code is reserved, hacker gets different code
-```
-
----
-
-## ⚡ Performance
-
-### Benchmarks
-
-| Metric | Without Cache | With Redis Cache |
-|--------|---------------|------------------|
-| **Redirect Latency** | 5-10ms | <1ms |
-| **Throughput** | 1,000 req/s | 10,000+ req/s |
-| **Cache Hit Rate** | N/A | 80-90% |
-| **DB Load** | 100% | 10-20% |
-
-### Optimization Strategies
-
-**Database:**
-- ✅ B-tree indexes on `short_code` and `original_url`
-- ✅ Partial index on `expires_at WHERE is_active = TRUE`
-- ✅ Connection pooling (HikariCP)
-
-**Caching:**
-- ✅ Redis with LRU eviction policy
-- ✅ Cache key pattern: `short:{shortCode}`
-- ✅ TTL aligned with URL expiry
-
-**Application:**
-- ✅ Async analytics processing
-- ✅ Non-blocking I/O
-- ✅ Thread pool for Kafka publishing
-
----
 
 ## 💻 Development
 
@@ -497,43 +299,6 @@ user_agent   | TEXT      | Browser/client info
 referrer     | TEXT      | HTTP referrer
 ```
 
-### Adding Features
-
-#### Enable Custom Domains
-```java
-@PostMapping("/api/shorten")
-public UrlResponse shortenUrl(@RequestBody ShortenRequest request) {
-    String baseUrl = request.getCustomDomain() != null 
-        ? request.getCustomDomain() 
-        : "http://localhost:8080";
-    // ...
-}
-```
-
-#### Add User Authentication
-```java
-@Entity
-public class UrlMapping {
-    // ...
-    @Column(name = "user_id")
-    private String userId;  // Link to user
-}
-```
-
-#### QR Code Generation
-```java
-@GetMapping("/{shortCode}/qr")
-public ResponseEntity<byte[]> getQrCode(@PathVariable String shortCode) {
-    String url = baseUrl + "/" + shortCode;
-    byte[] qrCode = qrCodeService.generate(url);
-    return ResponseEntity.ok()
-        .contentType(MediaType.IMAGE_PNG)
-        .body(qrCode);
-}
-```
-
----
-
 ## 🧪 Testing
 
 ### Run Tests
@@ -580,8 +345,6 @@ docker exec -it urlshortener-postgres psql -U dbuser -d urlshortener
 > SELECT * FROM url_mappings;
 > SELECT * FROM click_events;
 ```
-
----
 
 ## 🚢 Deployment
 
@@ -635,8 +398,6 @@ kubectl scale deployment url-shortener --replicas=5
 - ✅ Shared PostgreSQL database
 - ✅ Load balancer in front
 
----
-
 ## 🤝 Contributing
 
 Contributions are welcome! Please follow these guidelines:
@@ -654,31 +415,10 @@ Contributions are welcome! Please follow these guidelines:
 - Update documentation for API changes
 - Run `mvn clean verify` before committing
 
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-Built as a learning project to demonstrate:
-- ✅ System design (caching, rate limiting, async processing)
-- ✅ Spring Boot ecosystem (JPA, Redis, Kafka)
-- ✅ Database optimization (indexing, migrations)
-- ✅ Resilience patterns (fallbacks, graceful degradation)
-- ✅ Production best practices (monitoring, logging, containerization)
-
----
-
 ## 📞 Contact
 
 **Email:** sparshgirdhar19@gmail.com  
 **LinkedIn:** [Sparsh Girdhar](https://www.linkedin.com/in/sparsh-girdhar-979a60163/)
-
----
 
 ## 🗺️ Roadmap
 
@@ -704,12 +444,10 @@ Built as a learning project to demonstrate:
 - [ ] Prometheus metrics export
 - [ ] GraphQL API
 
----
-
 <div align="center">
 
 **⭐ Star this repo if you find it helpful!**
 
-Made with ❤️ by [SPARSH]
+Made with ❤️ by SPARSH
 
 </div>
